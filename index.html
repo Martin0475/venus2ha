@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BLE → MQTT PWA</title>
+<title>BLE ? MQTT PWA</title>
 <script src="paho-mqtt.js"></script>
 <style>
 body { font-family: Arial, sans-serif; padding: 20px; }
@@ -12,7 +12,7 @@ input, button { margin: 5px 0; padding: 5px; width: 100%; }
 </style>
 </head>
 <body>
-<h2>BLE → MQTT</h2>
+<h2>BLE 2 MQTT</h2>
 
 <h3>MQTT-Verbindung</h3>
 <input id="mqttIp" placeholder="MQTT IP">
@@ -40,6 +40,22 @@ function log(msg){
     logDiv.scrollTop = logDiv.scrollHeight;
 }
 
+// --- Hilfsfunktionen Hex ↔ Bytes ---
+function hexToBytes(hex) {
+    hex = hex.replace(/\s+/g, '');
+    let bytes = new Uint8Array(hex.length / 2);
+    for(let i = 0; i < hex.length; i += 2){
+        bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+    }
+    return bytes;
+}
+
+function bytesToHex(buffer) {
+    return [...new Uint8Array(buffer)]
+        .map(b => b.toString(16).padStart(2, '0').toUpperCase())
+        .join(' ');
+}
+
 // --- MQTT ---
 function connectMQTT() {
     let host = document.getElementById("mqttIp").value;
@@ -54,8 +70,17 @@ function connectMQTT() {
     };
 
     mqttClient.onMessageArrived = (message) => {
-        log("MQTT Nachricht empfangen: " + message.payloadString);
-        // hier kannst du BLE schreiben, falls nötig
+        let payload = message.payloadString;
+        log("MQTT empfangen: " + message.destinationName + " -> " + payload);
+        // Auf Write-Topic lauschen und an BLE weiterleiten
+        if(message.destinationName === "martin0475/ble2mqtt/write") {
+            if(txCharacteristic){
+                log("→ Weitergeleitet an BLE (Hex)");
+                sendBLEHex(payload);
+            } else {
+                log("→ Keine BLE-Verbindung, Nachricht verworfen");
+            }
+        }
     };
 
     mqttClient.connect({
@@ -63,7 +88,11 @@ function connectMQTT() {
         password: pass,
         useSSL: false,
         mqttVersion: 4,
-        onSuccess: () => log("MQTT verbunden"),
+        onSuccess: () => {
+            log("MQTT verbunden");
+            mqttClient.subscribe("martin0475/ble2mqtt/write");
+            log("Subscribed auf: martin0475/ble2mqtt/write");
+        },
         onFailure: (err) => log("MQTT Fehler: " + JSON.stringify(err))
     });
 }
@@ -76,7 +105,7 @@ function sendMQTT(topic, payload){
     let message = new Paho.Message(payload);
     message.destinationName = topic;
     mqttClient.send(message);
-    log("MQTT gesendet: " + topic + " -> " + payload);
+    log("→ MQTT gesendet: " + topic + " -> " + payload);
 }
 
 // --- BLE ---
@@ -101,9 +130,10 @@ async function scanBLE(){
 
         await rxCharacteristic.startNotifications();
         rxCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
-            let value = new TextDecoder().decode(event.target.value);
-            log("BLE empfangen: " + value);
-            sendMQTT("martin0475/ble2mqtt/read", value);
+            let hex = bytesToHex(event.target.value.buffer);
+            log("BLE empfangen (Hex): " + hex);
+            sendMQTT("martin0475/ble2mqtt/read", hex);
+            log("→ Weitergeleitet an MQTT Read-Topic");
         });
 
         log("BLE verbunden und Notifications aktiviert");
@@ -113,12 +143,14 @@ async function scanBLE(){
     }
 }
 
-async function sendBLE(value){
+// --- BLE schreiben (Hex, aufgerufen von MQTT Write-Topic) ---
+async function sendBLEHex(hexString){
     if(!txCharacteristic) { log("Keine BLE Verbindung"); return; }
-    let data = new TextEncoder().encode(value);
+    let data = hexToBytes(hexString);
     await txCharacteristic.writeValueWithoutResponse(data);
-    log("BLE gesendet: " + value);
+    log("BLE gesendet (Hex): " + hexString);
 }
 </script>
+
 </body>
 </html>
