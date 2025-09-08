@@ -3,85 +3,122 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BLE2MQTT PWA</title>
+<title>BLE → MQTT PWA</title>
 <script src="paho-mqtt.js"></script>
+<style>
+body { font-family: Arial, sans-serif; padding: 20px; }
+input, button { margin: 5px 0; padding: 5px; width: 100%; }
+#log { border: 1px solid #ccc; padding: 10px; height: 200px; overflow-y: scroll; }
+</style>
 </head>
 <body>
-<h2>BLE2MQTT</h2>
+<h2>BLE → MQTT</h2>
 
-<div>
-    <label>MQTT Broker IP: <input type="text" id="mqtt-ip" value="192.168.1.100"></label><br>
-    <label>Port: <input type="text" id="mqtt-port" value="1884"></label><br>
-    <label>Username: <input type="text" id="mqtt-user"></label><br>
-    <label>Password: <input type="password" id="mqtt-pass"></label><br>
-    <button id="connect-mqtt">Verbinde MQTT</button>
-</div>
+<h3>MQTT-Verbindung</h3>
+<input id="mqttIp" placeholder="MQTT IP">
+<input id="mqttPort" placeholder="Port (z.B. 1884)">
+<input id="mqttUser" placeholder="Benutzername">
+<input id="mqttPass" placeholder="Passwort">
+<button onclick="connectMQTT()">Verbinde MQTT</button>
 
-<div>
-    <button id="scan-ble">BLE Gerät scannen</button>
-    <p id="ble-status"></p>
-</div>
+<h3>BLE-Geräte</h3>
+<button onclick="scanBLE()">Scan starten</button>
+<ul id="bleDevices"></ul>
+
+<h3>Log</h3>
+<div id="log"></div>
 
 <script>
 let mqttClient;
 let bleDevice;
-let txCharacteristic;
-let rxCharacteristic;
+let bleServer;
+let txCharacteristic, rxCharacteristic;
 
-// ------------------ MQTT ------------------
-document.getElementById("connect-mqtt").addEventListener("click", () => {
-    const host = document.getElementById("mqtt-ip").value;
-    const port = parseInt(document.getElementById("mqtt-port").value);
-    const user = document.getElementById("mqtt-user").value;
-    const pass = document.getElementById("mqtt-pass").value;
+function log(msg){
+    let logDiv = document.getElementById("log");
+    logDiv.innerHTML += msg + "<br>";
+    logDiv.scrollTop = logDiv.scrollHeight;
+}
 
-    mqttClient = new Paho.MQTT.Client(host, port, "ble2mqtt_" + Math.random().toString(16).substr(2, 8));
-    mqttClient.onConnectionLost = e => console.log("MQTT verloren", e);
-    mqttClient.onMessageArrived = e => {
-        if(txCharacteristic){
-            txCharacteristic.writeValue(new TextEncoder().encode(e.payloadString))
-            .catch(err => console.error("BLE write error:", err));
-        }
+// --- MQTT ---
+function connectMQTT() {
+    let host = document.getElementById("mqttIp").value;
+    let port = parseInt(document.getElementById("mqttPort").value);
+    let user = document.getElementById("mqttUser").value;
+    let pass = document.getElementById("mqttPass").value;
+
+    mqttClient = new Paho.Client(host, port, "ble-client-" + Date.now());
+
+    mqttClient.onConnectionLost = (responseObject) => {
+        log("MQTT Verbindung verloren: " + responseObject.errorMessage);
+    };
+
+    mqttClient.onMessageArrived = (message) => {
+        log("MQTT Nachricht empfangen: " + message.payloadString);
+        // hier kannst du BLE schreiben, falls nötig
     };
 
     mqttClient.connect({
         userName: user,
         password: pass,
-        onSuccess: () => console.log("MQTT verbunden"),
-        onFailure: err => console.error("MQTT Fehler", err)
+        useSSL: false,
+        mqttVersion: 4,
+        onSuccess: () => log("MQTT verbunden"),
+        onFailure: (err) => log("MQTT Fehler: " + JSON.stringify(err))
     });
-});
+}
 
-// ------------------ BLE ------------------
-document.getElementById("scan-ble").addEventListener("click", async () => {
+function sendMQTT(topic, payload){
+    if(!mqttClient || !mqttClient.isConnected()) {
+        log("MQTT nicht verbunden");
+        return;
+    }
+    let message = new Paho.Message(payload);
+    message.destinationName = topic;
+    mqttClient.send(message);
+    log("MQTT gesendet: " + topic + " -> " + payload);
+}
+
+// --- BLE ---
+async function scanBLE(){
     try {
-        bleDevice = await navigator.bluetooth.requestDevice({
+        let device = await navigator.bluetooth.requestDevice({
             acceptAllDevices: true,
-            optionalServices: ['0000ff00-0000-1000-8000-00805f9b34fb']
+            optionalServices: ["0000ff00-0000-1000-8000-00805f9b34fb"]
         });
-        document.getElementById("ble-status").textContent = `Verbinde mit ${bleDevice.name || bleDevice.id}...`;
+        log("Gerät gefunden: " + device.name);
+        document.getElementById("bleDevices").innerHTML += `<li>${device.name}</li>`;
+        bleDevice = device;
 
-        const server = await bleDevice.gatt.connect();
-        const service = await server.getPrimaryService('0000ff00-0000-1000-8000-00805f9b34fb');
+        bleDevice.addEventListener('gattserverdisconnected', () => {
+            log("BLE getrennt: " + bleDevice.name);
+        });
 
-        txCharacteristic = await service.getCharacteristic('0000ff01-0000-1000-8000-00805f9b34fb');
-        rxCharacteristic = await service.getCharacteristic('0000ff02-0000-1000-8000-00805f9b34fb');
+        bleServer = await bleDevice.gatt.connect();
+        const service = await bleServer.getPrimaryService("0000ff00-0000-1000-8000-00805f9b34fb");
+        txCharacteristic = await service.getCharacteristic("0000ff01-0000-1000-8000-00805f9b34fb");
+        rxCharacteristic = await service.getCharacteristic("0000ff02-0000-1000-8000-00805f9b34fb");
 
         await rxCharacteristic.startNotifications();
-        rxCharacteristic.addEventListener('characteristicvaluechanged', e => {
-            const value = new TextDecoder().decode(e.target.value);
-            console.log("BLE RX:", value);
-            if(mqttClient && mqttClient.isConnected()){
-                mqttClient.publish("martin0475/ble2mqtt/read", value);
-            }
+        rxCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
+            let value = new TextDecoder().decode(event.target.value);
+            log("BLE empfangen: " + value);
+            sendMQTT("martin0475/ble2mqtt/read", value);
         });
 
-        document.getElementById("ble-status").textContent = `Verbunden mit ${bleDevice.name || bleDevice.id}`;
-    } catch(err){
-        console.error("BLE Fehler:", err);
-        document.getElementById("ble-status").textContent = "BLE Verbindung fehlgeschlagen: " + err;
+        log("BLE verbunden und Notifications aktiviert");
+
+    } catch (error) {
+        log("BLE Fehler: " + error);
     }
-});
+}
+
+async function sendBLE(value){
+    if(!txCharacteristic) { log("Keine BLE Verbindung"); return; }
+    let data = new TextEncoder().encode(value);
+    await txCharacteristic.writeValueWithoutResponse(data);
+    log("BLE gesendet: " + value);
+}
 </script>
 </body>
 </html>
