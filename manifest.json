@@ -1,0 +1,8 @@
+{
+  "name": "BLE to HA MQTT",
+  "short_name": "BLEMQTT",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#4CAF50"
+}
