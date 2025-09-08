@@ -1,93 +1,98 @@
 <!DOCTYPE html>
-<html>
+<html lang="de">
 <head>
-  <meta charset="utf-8">
-  <title>BLE to MQTT (Web Bluetooth)</title>
-  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<meta charset="UTF-8">
+<title>BLE → HA WebSocket</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  input, button { padding: 5px; margin: 5px 0; }
+  #log { border: 1px solid #ccc; padding: 10px; height: 200px; overflow-y: auto; }
+</style>
 </head>
 <body>
-  <h1>BLE → MQTT Forwarder</h1>
-  <button id="connect">Connect BLE</button>
-  <pre id="log"></pre>
+
+<h2>BLE → Home Assistant WebSocket</h2>
+
+<label>Home Assistant IP:</label>
+<input type="text" id="ha_ip" placeholder="z.B. 192.168.178.110:8123"><br>
+
+<label>Long-Lived Token:</label>
+<input type="text" id="ha_token" placeholder="Token hier"><br>
+
+<button id="connect_ha">Verbinde zu HA</button>
+<button id="connect_ble">Verbinde BLE</button>
+
+<h3>Log</h3>
+<div id="log"></div>
 
 <script>
-const logEl = document.getElementById("log");
-function log(msg) { logEl.textContent += msg + "\n"; }
+const logDiv = document.getElementById("log");
+function log(msg){ logDiv.innerHTML += msg + "<br>"; logDiv.scrollTop = logDiv.scrollHeight; }
 
-let bleDevice, gattServer, txChar, rxChar;
-let mqttClient;
+let ws;
+let bleDevice;
+let bleCharacteristic;
 
-// UUIDs (Beispiel, anpassen!)
-const SERVICE_UUID  = "0000ff00-0000-1000-8000-00805f9b34fb";
-const RX_UUID       = "0000ff02-0000-1000-8000-00805f9b34fb"; // notifications
-const TX_UUID       = "0000ff01-0000-1000-8000-00805f9b34fb"; // write
+// Home Assistant WebSocket verbinden
+document.getElementById("connect_ha").onclick = () => {
+  const ip = document.getElementById("ha_ip").value;
+  const token = document.getElementById("ha_token").value;
+  if(!ip || !token){ alert("IP und Token angeben"); return; }
 
-document.getElementById("connect").addEventListener("click", async () => {
-  try {
-    // MQTT verbinden (HA Mosquitto Add-on muss WS anhaben, z.B. Port 9001)
-    mqttClient = mqtt.connect("ws://homeassistant.local:9001", {
-      username: "deinuser",
-      password: "deinpass"
-    });
-    mqttClient.on("connect", () => log("MQTT connected"));
+  ws = new WebSocket(`wss://${ip}/api/websocket`);
 
-    // BLE Gerät auswählen
-    bleDevice = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [SERVICE_UUID] }],
-      optionalServices: [SERVICE_UUID]
-    });
-    log("Selected: " + bleDevice.name);
+  ws.onopen = () => log("WebSocket: Verbindung geöffnet");
+  ws.onclose = () => log("WebSocket: Verbindung geschlossen");
+  ws.onerror = (e) => log("WebSocket Fehler: " + e);
 
-    gattServer = await bleDevice.gatt.connect();
-    const service = await gattServer.getPrimaryService(SERVICE_UUID);
+  ws.onmessage = (msg) => {
+    const data = JSON.parse(msg.data);
+    log("Von HA: " + JSON.stringify(data));
 
-    rxChar = await service.getCharacteristic(RX_UUID);
-    txChar = await service.getCharacteristic(TX_UUID);
-
-    await rxChar.startNotifications();
-    rxChar.addEventListener("characteristicvaluechanged", handleNotification);
-
-    log("Connected & notifications started");
-  } catch (e) {
-    log("Error: " + e);
-  }
-});
-
-function handleNotification(event) {
-  let value = event.target.value;
-  let bytes = [];
-  for (let i = 0; i < value.byteLength; i++) {
-    bytes.push(value.getUint8(i));
-  }
-  log("RX: " + bytes.join(","));
-
-  // an MQTT schicken
-  if (mqttClient && mqttClient.connected) {
-    mqttClient.publish("ble/device/rx", JSON.stringify({
-      uuid: RX_UUID,
-      bytes: bytes
-    }));
-  }
-}
-
-// Beispiel: Write an BLE Characteristic
-function sendToBle(data) {
-  if (!txChar) return;
-  let buffer = new Uint8Array(data).buffer;
-  txChar.writeValue(buffer);
-  log("TX: " + data);
-}
-
-// MQTT → BLE weiterreichen
-if (mqttClient) {
-  mqttClient.subscribe("ble/device/tx");
-  mqttClient.on("message", (topic, message) => {
-    if (topic === "ble/device/tx") {
-      let obj = JSON.parse(message.toString());
-      sendToBle(obj.bytes);
+    // Beispiel: wenn HA etwas zurückschickt, ans BLE-Gerät senden
+    if(bleCharacteristic && data.type === "write_ble" && data.value){
+      const buffer = new Uint8Array(data.value);
+      bleCharacteristic.writeValue(buffer).then(() => log("Daten an BLE gesendet"));
     }
+  };
+
+  // Authentifizierung
+  ws.addEventListener('open', () => {
+    ws.send(JSON.stringify({ type: "auth", access_token: token }));
+    log("Authentifizierung gesendet");
   });
-}
+};
+
+// BLE verbinden
+document.getElementById("connect_ble").onclick = async () => {
+  try {
+    bleDevice = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: ['0000ff00-0000-1000-8000-00805f9b34fb']
+    });
+    const server = await bleDevice.gatt.connect();
+    const service = await server.getPrimaryService('0000ff00-0000-1000-8000-00805f9b34fb');
+    bleCharacteristic = await service.getCharacteristic('0000ff02-0000-1000-8000-00805f9b34fb');
+
+    // Notifications aktivieren
+    await bleCharacteristic.startNotifications();
+    bleCharacteristic.addEventListener('characteristicvaluechanged', e => {
+      const value = new Uint8Array(e.target.value.buffer);
+      log("BLE empfangen: " + Array.from(value).map(x => x.toString(16)).join(" "));
+      
+      // An HA schicken
+      if(ws && ws.readyState === WebSocket.OPEN){
+        ws.send(JSON.stringify({ type: "ble_data", value: Array.from(value) }));
+      }
+    });
+
+    log("BLE verbunden und Notifications aktiviert");
+  } catch(e){
+    log("BLE Fehler: " + e);
+  }
+};
 </script>
+
 </body>
 </html>
+
